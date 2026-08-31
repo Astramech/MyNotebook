@@ -134,7 +134,10 @@ def _connect(path: Path = DB_PATH) -> Any:
             raise RuntimeError(
                 "云端模式需要 psycopg；请安装 requirements.txt 中的依赖。"
             ) from exc
-        return _PgConnection(psycopg.connect(DATABASE_URL))
+        # Supabase's transaction pooler does not retain session-level prepared
+        # statements. Disabling psycopg's automatic prepare cache keeps each
+        # short Streamlit transaction safe on pooled connections.
+        return _PgConnection(psycopg.connect(DATABASE_URL, prepare_threshold=None))
     conn = sqlite3.connect(path, timeout=60, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import mimetypes
 import os
@@ -46,6 +47,27 @@ def source_rows(connection: sqlite3.Connection, table: str) -> list[sqlite3.Row]
     return connection.execute(f"SELECT * FROM {table}").fetchall()
 
 
+def cloud_asset_path(asset_path: str) -> str:
+    if not asset_path:
+        return ""
+    suffix = Path(asset_path).suffix.lower()
+    digest = hashlib.sha256(asset_path.encode("utf-8")).hexdigest()
+    return f"attachments/cloud/{digest}{suffix}"
+
+
+def cloud_blocks_json(value: str) -> str:
+    try:
+        blocks = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return value
+    if not isinstance(blocks, list):
+        return value
+    for block in blocks:
+        if isinstance(block, dict) and block.get("asset_path"):
+            block["asset_path"] = cloud_asset_path(str(block["asset_path"]))
+    return json.dumps(blocks, ensure_ascii=False, sort_keys=True)
+
+
 def insert_rows(cloud_db, table: str, rows: list[sqlite3.Row]) -> int:
     if not rows:
         return 0
@@ -57,7 +79,25 @@ def insert_rows(cloud_db, table: str, rows: list[sqlite3.Row]) -> int:
     )
     with cloud_db.transaction() as target:
         for row in rows:
-            target.execute(sql, [row[column] for column in columns])
+            values = [row[column] for column in columns]
+            if table == "kb_pages":
+                # A child page can have a lower id than its parent in the local
+                # notebook. Insert every page first, then restore the tree.
+                values[columns.index("parent_id")] = None
+            elif table == "kb_blocks":
+                asset_index = columns.index("asset_path")
+                values[asset_index] = cloud_asset_path(str(values[asset_index] or ""))
+            elif table == "kb_versions":
+                json_index = columns.index("blocks_json")
+                values[json_index] = cloud_blocks_json(str(values[json_index] or "[]"))
+            target.execute(sql, values)
+        if table == "kb_pages":
+            for row in rows:
+                if row["parent_id"] is not None:
+                    target.execute(
+                        "UPDATE kb_pages SET parent_id=? WHERE id=?",
+                        (row["parent_id"], row["id"]),
+                    )
     return len(rows)
 
 
@@ -76,7 +116,7 @@ def upload_assets(cloud_db, source: sqlite3.Connection) -> tuple[int, list[str]]
             missing.append(asset_path)
             continue
         mime = mimetypes.guess_type(local.name)[0] or "application/octet-stream"
-        cloud_db._upload_asset(asset_path, local.read_bytes(), mime)
+        cloud_db._upload_asset(cloud_asset_path(asset_path), local.read_bytes(), mime)
         uploaded += 1
         if index % 25 == 0:
             print(f"assets: {index}/{len(paths)}", flush=True)
@@ -91,6 +131,11 @@ def main() -> int:
         default=ROOT / ".streamlit" / "cloud-secrets.toml",
     )
     parser.add_argument("--source", type=Path, default=ROOT / "my_study_data.db")
+    parser.add_argument(
+        "--replace-partial",
+        action="store_true",
+        help="Clear only MyNotebook kb_* cloud tables before retrying a failed migration",
+    )
     args = parser.parse_args()
     load_secrets(args.secrets.resolve())
     if not os.environ.get("SUPABASE_DB_URL"):
@@ -103,7 +148,17 @@ def main() -> int:
         raise SystemExit("Cloud mode did not activate")
     cloud_db.init_schema()
     if cloud_db.query("SELECT 1 FROM kb_subjects LIMIT 1"):
-        raise SystemExit("Cloud database is not empty; migration stopped without changing it")
+        if not args.replace_partial:
+            raise SystemExit(
+                "Cloud database is not empty; migration stopped without changing it"
+            )
+        with cloud_db.transaction() as target:
+            target.execute(
+                "TRUNCATE TABLE kb_links,kb_page_tags,kb_tags,kb_versions,"
+                "kb_reflections,kb_blocks,kb_pages,kb_subjects,kb_migrations "
+                "RESTART IDENTITY CASCADE"
+            )
+        print("Cleared partial MyNotebook cloud migration.", flush=True)
 
     source = sqlite3.connect(args.source.resolve())
     source.row_factory = sqlite3.Row
