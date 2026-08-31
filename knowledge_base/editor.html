@@ -1,0 +1,24 @@
+<section class="kb-editor-shell">
+  <div class="kb-editor-topbar">
+    <div class="kb-insert-tools" aria-label="插入内容">
+      <button type="button" data-add="text">＋ 段落</button>
+      <button type="button" data-add="heading2">H2 小标题</button>
+      <button type="button" data-add="equation">∑ 公式</button>
+      <button type="button" data-add="callout">💡 想法</button>
+      <button type="button" id="kb-image-button">▧ 图片</button>
+      <input id="kb-image-input" type="file" accept="image/*" hidden />
+    </div>
+    <div class="kb-save-tools">
+      <span id="kb-save-status">已保存</span>
+      <button type="button" id="kb-save-button" class="primary">保存</button>
+    </div>
+  </div>
+  <input id="kb-page-title" class="kb-page-title" autocomplete="off" />
+  <div id="kb-blocks" class="kb-blocks"></div>
+  <button type="button" id="kb-add-last" class="kb-add-last">＋ 在末尾继续写</button>
+  <p class="kb-shortcuts">
+    停止输入 10 秒后自动保存 · 离开页面前保存 · Ctrl+S 立即保存 ·
+    Ctrl+Enter 新建下一块 · Alt+↑/↓ 移动 · 可直接粘贴截图 ·
+    <code>[[页面名]]</code> 建立双向链接
+  </p>
+</section>

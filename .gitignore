@@ -1,0 +1,20 @@
+# Personal notes and databases must never enter the code repository.
+my_study_data.db
+my_study_data.db-*
+backups/
+uploads/
+学科笔记/
+exports/
+*.docx
+*.lnk
+*.log
+
+# Local secrets and runtime files.
+.streamlit/secrets.toml
+.streamlit/cloud-secrets.toml
+__pycache__/
+*.py[cod]
+
+# User assets are migrated to private Supabase Storage.
+static/*
+!static/.gitkeep
