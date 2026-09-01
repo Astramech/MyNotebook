@@ -16,6 +16,11 @@ def main() -> int:
     parser.add_argument("--service-key", default="")
     parser.add_argument("--public-url", default="")
     parser.add_argument("--app-password", default="")
+    parser.add_argument(
+        "--activate-local",
+        action="store_true",
+        help="Also make the local Streamlit app use the cloud database",
+    )
     args = parser.parse_args()
 
     target = ROOT / ".streamlit" / "cloud-secrets.toml"
@@ -49,7 +54,12 @@ def main() -> int:
         "APP_PASSWORD": args.app_password or existing.get("APP_PASSWORD", ""),
     }
     lines = [f"{key} = {json.dumps(value)}" for key, value in values.items()]
-    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    content = "\n".join(lines) + "\n"
+    target.write_text(content, encoding="utf-8")
+    if args.activate_local:
+        (ROOT / ".streamlit" / "secrets.toml").write_text(
+            content, encoding="utf-8"
+        )
     print("cloud_secrets_written")
     return 0
 

@@ -381,6 +381,8 @@ export default function(component) {
       const imageWrap = document.createElement("div");
       imageWrap.className = "kb-image-wrap";
       const image = document.createElement("img");
+      image.loading = "lazy";
+      image.decoding = "async";
       image.src = block.asset_path?.startsWith("data:")
         ? block.asset_path
         : (block.asset_url || `app/static/${block.asset_path}`);

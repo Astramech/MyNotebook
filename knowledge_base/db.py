@@ -107,6 +107,24 @@ class _PgConnection:
     def close(self) -> None:
         self._connection.close()
 
+    @property
+    def closed(self) -> bool:
+        return bool(self._connection.closed)
+
+
+_CLOUD_CONNECTION: _PgConnection | None = None
+
+
+def _discard_cloud_connection() -> None:
+    global _CLOUD_CONNECTION
+    connection = _CLOUD_CONNECTION
+    _CLOUD_CONNECTION = None
+    if connection is not None:
+        try:
+            connection.close()
+        except Exception:
+            pass
+
 
 def _postgres_sql(sql: str) -> str:
     value = sql.replace(" COLLATE NOCASE", "")
@@ -127,6 +145,7 @@ def _postgres_sql(sql: str) -> str:
 
 
 def _connect(path: Path = DB_PATH) -> Any:
+    global _CLOUD_CONNECTION
     if CLOUD_MODE:
         try:
             import psycopg
@@ -137,7 +156,11 @@ def _connect(path: Path = DB_PATH) -> Any:
         # Supabase's transaction pooler does not retain session-level prepared
         # statements. Disabling psycopg's automatic prepare cache keeps each
         # short Streamlit transaction safe on pooled connections.
-        return _PgConnection(psycopg.connect(DATABASE_URL, prepare_threshold=None))
+        if _CLOUD_CONNECTION is None or _CLOUD_CONNECTION.closed:
+            _CLOUD_CONNECTION = _PgConnection(
+                psycopg.connect(DATABASE_URL, prepare_threshold=None)
+            )
+        return _CLOUD_CONNECTION
     conn = sqlite3.connect(path, timeout=60, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
@@ -155,10 +178,15 @@ def transaction():
             yield conn
             conn.commit()
         except Exception:
-            conn.rollback()
+            try:
+                conn.rollback()
+            except Exception:
+                if CLOUD_MODE:
+                    _discard_cloud_connection()
             raise
         finally:
-            conn.close()
+            if not CLOUD_MODE:
+                conn.close()
 
 
 def init_schema() -> None:
@@ -349,11 +377,25 @@ def _init_postgres_schema() -> None:
 
 def query(sql: str, params: Iterable[Any] = ()) -> list[Any]:
     with _LOCK:
-        conn = _connect()
-        try:
-            return conn.execute(sql, tuple(params)).fetchall()
-        finally:
-            conn.close()
+        for attempt in range(2):
+            conn = _connect()
+            try:
+                rows = conn.execute(sql, tuple(params)).fetchall()
+                if CLOUD_MODE:
+                    # End psycopg's implicit read transaction while retaining
+                    # the expensive TCP/TLS connection for the next query.
+                    conn.rollback()
+                return rows
+            except Exception:
+                if CLOUD_MODE:
+                    _discard_cloud_connection()
+                    if attempt == 0:
+                        continue
+                raise
+            finally:
+                if not CLOUD_MODE:
+                    conn.close()
+        return []
 
 
 def migration_done(key: str) -> bool:
@@ -708,12 +750,69 @@ def _signed_asset_url_cached(asset_path: str, time_bucket: int) -> str:
     return f"{SUPABASE_URL}/storage/v1{signed if signed.startswith('/') else '/' + signed}"
 
 
+def _absolute_signed_url(signed: str) -> str:
+    if not signed:
+        return ""
+    if signed.startswith("http"):
+        return signed
+    if signed.startswith("/storage/v1"):
+        return f"{SUPABASE_URL}{signed}"
+    return f"{SUPABASE_URL}/storage/v1{signed if signed.startswith('/') else '/' + signed}"
+
+
+@functools.lru_cache(maxsize=256)
+def _signed_asset_urls_cached(
+    asset_paths: tuple[str, ...], time_bucket: int
+) -> dict[str, str]:
+    del time_bucket
+    urls: dict[str, str] = {}
+    # Keep requests comfortably below gateway/body limits on image-heavy pages.
+    for start in range(0, len(asset_paths), 100):
+        chunk = asset_paths[start : start + 100]
+        payload = json.dumps({"expiresIn": 3600, "paths": list(chunk)}).encode("utf-8")
+        raw = _storage_request(
+            "POST",
+            f"/object/sign/{urllib.parse.quote(SUPABASE_BUCKET)}",
+            data=payload,
+            content_type="application/json",
+        )
+        entries = json.loads(raw.decode("utf-8"))
+        if not isinstance(entries, list):
+            raise RuntimeError("Supabase 批量图片地址返回格式异常。")
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            path = str(entry.get("path") or "").replace("\\", "/")
+            signed = str(entry.get("signedURL") or entry.get("signedUrl") or "")
+            if path and signed:
+                urls[path] = _absolute_signed_url(signed)
+    return urls
+
+
+def asset_urls(asset_paths: Iterable[str]) -> dict[str, str]:
+    normalized = tuple(
+        sorted(
+            {
+                str(path).replace("\\", "/")
+                for path in asset_paths
+                if str(path).strip()
+            }
+        )
+    )
+    if not normalized:
+        return {}
+    if not CLOUD_MODE:
+        return {path: f"app/static/{path}" for path in normalized}
+    return _signed_asset_urls_cached(normalized, int(time.time() // 3000))
+
+
 def asset_url(asset_path: str) -> str:
     if not asset_path:
         return ""
     if not CLOUD_MODE:
         return f"app/static/{asset_path.replace(chr(92), '/')}"
-    return _signed_asset_url_cached(asset_path, int(time.time() // 3000))
+    normalized = asset_path.replace("\\", "/")
+    return asset_urls((normalized,)).get(normalized, "")
 
 
 def get_page(page_id: int) -> dict[str, Any] | None:
@@ -731,13 +830,18 @@ def get_page(page_id: int) -> dict[str, Any] | None:
     block_rows = query(
         "SELECT * FROM kb_blocks WHERE page_id=? ORDER BY sort_order,id", (page_id,)
     )
+    signed_urls = asset_urls(
+        str(row["asset_path"] or "") for row in block_rows if row["asset_path"]
+    )
     page["blocks"] = [
         {
             "uid": row["uid"],
             "type": row["block_type"],
             "content": row["content"] or "",
             "asset_path": row["asset_path"] or "",
-            "asset_url": asset_url(str(row["asset_path"] or "")),
+            "asset_url": signed_urls.get(
+                str(row["asset_path"] or "").replace("\\", "/"), ""
+            ),
             "metadata": _json_object(row["metadata_json"]),
         }
         for row in block_rows
