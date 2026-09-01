@@ -15,7 +15,20 @@ def main() -> int:
     parser.add_argument("--region", required=True)
     parser.add_argument("--service-key", default="")
     parser.add_argument("--public-url", default="")
+    parser.add_argument("--app-password", default="")
     args = parser.parse_args()
+
+    target = ROOT / ".streamlit" / "cloud-secrets.toml"
+    existing: dict[str, str] = {}
+    if target.exists():
+        for line in target.read_text(encoding="utf-8").splitlines():
+            if "=" not in line:
+                continue
+            key, raw_value = line.split("=", 1)
+            try:
+                existing[key.strip()] = str(json.loads(raw_value.strip()))
+            except json.JSONDecodeError:
+                continue
 
     bootstrap_path = ROOT / "backups" / ".cloud-bootstrap.json"
     bootstrap = json.loads(bootstrap_path.read_text(encoding="utf-8"))
@@ -28,12 +41,14 @@ def main() -> int:
     values = {
         "SUPABASE_DB_URL": database_url,
         "SUPABASE_URL": f"https://{args.project_ref}.supabase.co",
-        "SUPABASE_SERVICE_ROLE_KEY": args.service_key,
+        "SUPABASE_SERVICE_ROLE_KEY": args.service_key
+        or existing.get("SUPABASE_SERVICE_ROLE_KEY", ""),
         "SUPABASE_STORAGE_BUCKET": "mynotebook-assets",
-        "MYNOTEBOOK_PUBLIC_URL": args.public_url,
+        "MYNOTEBOOK_PUBLIC_URL": args.public_url
+        or existing.get("MYNOTEBOOK_PUBLIC_URL", ""),
+        "APP_PASSWORD": args.app_password or existing.get("APP_PASSWORD", ""),
     }
     lines = [f"{key} = {json.dumps(value)}" for key, value in values.items()]
-    target = ROOT / ".streamlit" / "cloud-secrets.toml"
     target.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("cloud_secrets_written")
     return 0

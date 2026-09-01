@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import hmac
 import re
 import uuid
 from pathlib import Path
@@ -256,6 +257,8 @@ def run() -> None:
         initial_sidebar_state="auto",
     )
     st.markdown(APP_CSS, unsafe_allow_html=True)
+    if not _require_cloud_login():
+        return
     db.init_schema()
     _restore_page_from_query()
     if st.session_state.pop("kb_clear_search", False):
@@ -282,6 +285,44 @@ def run() -> None:
             _render_page(page)
         else:
             _render_home(import_report)
+
+
+def _require_cloud_login() -> bool:
+    """Keep a public Streamlit endpoint from exposing private study notes."""
+    try:
+        expected = str(st.secrets.get("APP_PASSWORD", "")).strip()
+    except Exception:
+        expected = ""
+    expected = expected or str(os.environ.get("APP_PASSWORD", "")).strip()
+    if not expected:
+        return True
+    if st.session_state.get("kb_authenticated") is True:
+        return True
+
+    st.markdown(
+        "<div style='max-width:430px;margin:9vh auto 1rem;text-align:center'>"
+        "<div class='kb-brand' style='font-size:2rem'>MyNotebook</div>"
+        "<div class='kb-brand-sub'>你的私人云端学习空间</div></div>",
+        unsafe_allow_html=True,
+    )
+    with st.form("kb_cloud_login", clear_on_submit=False):
+        password = st.text_input(
+            "访问密码",
+            type="password",
+            placeholder="输入访问密码",
+            autocomplete="current-password",
+        )
+        submitted = st.form_submit_button(
+            "进入笔记本", type="primary", use_container_width=True
+        )
+    if submitted:
+        if hmac.compare_digest(password, expected):
+            st.session_state.kb_authenticated = True
+            st.rerun()
+        else:
+            st.error("密码不正确，请重新输入。")
+    st.caption("登录状态只保存在当前浏览器会话中。")
+    return False
 
 
 def _restore_page_from_query() -> None:
